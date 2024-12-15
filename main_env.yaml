@@ -1,0 +1,9 @@
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python
+  - snakemake
+  - snakemake-executor-plugin-cluster-generic
+  - git
+  - tmux
