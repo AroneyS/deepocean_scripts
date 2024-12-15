@@ -40,7 +40,7 @@ def main(arguments):
         logging.info(f"Copying {assembly_name} to {args.output}")
 
         try:
-            contigs_path = os.path.join(assembly, f"final_contigs.fa")
+            contigs_path = os.path.join(assembly, f"final.contigs.fa")
             assert os.path.exists(contigs_path)
         except AssertionError:
             logging.error(f"Metaspades output not yet supported: {assembly}")
