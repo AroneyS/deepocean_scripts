@@ -2,7 +2,7 @@
 
 """
 Author: Samuel Aroney
-Extract completed assemblies
+Extract extra files for completed assemblies
 """
 
 import sys
@@ -31,26 +31,21 @@ def main(arguments):
         loglevel = logging.INFO
     logging.basicConfig(level=loglevel, format="%(asctime)s %(levelname)s: %(message)s", datefmt="%Y/%m/%d %I:%M:%S %p")
 
-    # Search args.output for files within /assemblies/*done and get the path without the .done extension
     assemblies_folder = os.path.join(args.input, "assemblies")
     assemblies = [os.path.join(assemblies_folder, f.replace(".done", "")) for f in os.listdir(assemblies_folder) if f.endswith(".done")]
 
     for assembly in assemblies:
         assembly_name = os.path.basename(assembly)
-        logging.info(f"Copying {assembly_name} to {args.output}")
-
-        try:
-            contigs_path = os.path.join(assembly, f"final.contigs.fa")
-            assert os.path.exists(contigs_path)
-        except AssertionError:
-            logging.error(f"Metaspades output not yet supported: {assembly}")
-            continue
+        logging.info(f"Copying {assembly_name} files to {args.output}")
 
         output_path = os.path.join(args.output, assembly_name + ".fa")
-        shutil.copyfile(contigs_path, output_path)
+        assert os.path.exists(output_path)
 
         benchmark_path = os.path.join(args.input, "benchmarks", assembly_name + ".tsv")
-        shutil.copyfile(benchmark_path, os.path.join(args.output, assembly_name + ".tsv"))
+        shutil.copy(benchmark_path, args.output)
+
+        log_path = os.path.join(args.input, "logs", assembly_name + ".log")
+        shutil.copy(log_path, args.output)
 
     logging.info("Done")
 
