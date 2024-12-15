@@ -49,6 +49,9 @@ def main(arguments):
         output_path = os.path.join(args.output, assembly_name + ".fa")
         shutil.copyfile(contigs_path, output_path)
 
+        benchmark_path = os.path.join(args.input, "benchmarks", assembly_name + ".tsv")
+        shutil.copyfile(benchmark_path, os.path.join(args.output, assembly_name + ".tsv"))
+
     logging.info("Done")
 
 if __name__ == "__main__":
