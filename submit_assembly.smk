@@ -66,6 +66,16 @@ def get_assemble_memory(wildcards, attempt, unit=None):
 
     return mem * mult
 
+def copy_output_cmd(wildcards, attempt):
+    if attempt == 1:
+        filename = "scaffolds.fasta"
+        assembler = "spades"
+    else:
+        filename = "final.contigs.fa"
+        assembler = "megahit"
+
+    return f"cp {{params.dir}}/{filename} /results/{{wildcards.coassembly}}.fa && echo {assembler} > /results/{{wildcards.coassembly}}.assembler"
+
 #############
 ### Rules ###
 #############
@@ -79,13 +89,14 @@ rule assembly:
     params:
         reads_1 = lambda wildcards: reads_1[wildcards.coassembly],
         reads_2 = lambda wildcards: reads_2[wildcards.coassembly],
-        dir = directory("assemblies/{coassembly}"),
+        dir = "$TMPDIR/{coassembly}",
     threads: lambda wildcards, attempt: get_assemble_threads(wildcards, attempt)
     resources:
         mem_mb = lambda wildcards, attempt: get_assemble_memory(wildcards, attempt, unit="MB"),
         mem_assembler = get_assemble_memory,
         runtime = "48h",
         assembler = get_assemble_assembler,
+        copy_output_cmd = copy_output_cmd,
     log:
         "logs/{coassembly}.log"
     benchmark:
@@ -93,7 +104,7 @@ rule assembly:
     conda:
         "assembly.yaml"
     shell:
-        "rm -rf {params.dir} && "
+        "echo {params.dir} && "
         "{resources.assembler} "
         "-m {resources.mem_assembler} "
         "-1 {params.reads_1} "
@@ -101,3 +112,4 @@ rule assembly:
         "-t {threads} "
         "-o {params.dir} "
         "&> {log} "
+        "&& {resources.copy_output_cmd} "
