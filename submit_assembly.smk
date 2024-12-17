@@ -46,9 +46,9 @@ def get_assemble_memory(wildcards, attempt, unit=None):
     # Attempt 1 with 250GB, 2 with 500GB, then 250GB with Megahit
     match attempt:
         case 1:
-            mem = 354
+            mem = 353
         case 2:
-            mem = 354
+            mem = 353
             if not unit: unit = "B"
         case 3:
             mem = 250
