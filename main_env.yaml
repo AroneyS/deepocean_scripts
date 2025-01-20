@@ -3,6 +3,8 @@ channels:
   - bioconda
 dependencies:
   - python
+  - polars=0.19.*
+  - extern
   - snakemake
   - snakemake-executor-plugin-cluster-generic
   - git
