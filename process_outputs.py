@@ -78,7 +78,7 @@ def main(arguments):
 
         # Copy contigs and rename
         coassembly_contig_files["name"].append(coassembly_name)
-        coassembly_contig_files["assembly"].append(contigs)
+        coassembly_contig_files["assembly"].append(os.path.abspath(contigs))
         contigs_output = os.path.join(output_contigs, f"{coassembly_name}.contigs.fasta")
         extern.run(f"cp {contigs} {contigs_output}")
 
