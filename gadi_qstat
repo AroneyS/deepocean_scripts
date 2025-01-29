@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+import os
+import sys
+import subprocess
+import time
+
+## Code below copied from the extern python package. Copy the code here so there are no dependencies.
+
+def run(command, stdin=None):
+    '''
+    Run a subprocess.check_output() with the given command with
+    'bash -c command'
+    returning the stdout. If the command fails (i.e. has a non-zero exitstatus),
+    raise a ExternCalledProcessError that includes the $stderr as part of
+    the error message
+
+    Parameters
+    ----------
+    command: str
+        command to run
+    stdin: str or None
+        stdin to be provided to the process, to subprocess.communicate.
+
+    Returns
+    -------
+    Standard output of the run command
+
+    Exceptions
+    ----------
+    extern.ExternCalledProcessError including stdout and stderr of the run
+    command should it return with non-zero exit status.
+    '''
+    #logging.debug("Running extern cmd: %s" % command)
+
+    using_stdin = stdin is not None
+    process = process = subprocess.Popen(
+        ["bash",'-o','pipefail',"-c", command],
+        stdin= (subprocess.PIPE if using_stdin else None),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate(stdin)
+
+    if process.returncode != 0:
+        raise ExternCalledProcessError(process, command, stdout.decode(), stderr.decode())
+    return stdout
+
+#%% CLASSES ##########
+######################
+
+class ExternCalledProcessError(subprocess.CalledProcessError):
+    def __init__(self, completed_process, command, stdout, stderr):
+        self.command = command
+        self.returncode = completed_process.returncode
+        self.stderr = stderr
+        self.stdout = stdout
+        self.completed_process = completed_process
+
+    def __str__(self):
+        return "Command %s returned non-zero exit status %i.\n"\
+            "STDERR was: %sSTDOUT was: %s" % (
+                self.command,
+                self.returncode,
+                self.stderr,
+                self.stdout)
+
+if __name__ == '__main__':
+
+    jobid = sys.argv[1]
+
+    num_retry = 0
+    error = None
+    while True:
+        if num_retry < 10:
+            try:
+                output = run("qstat -x -f %s" % jobid).decode()
+                break
+            except ExternCalledProcessError as e:
+                # Sometimes get transient errors like:
+
+                # ExternCalledProcessError: Command qstat -x -f 5030967.pbs returned non-zero exit status 255.
+                # STDERR was: Communication failure.
+                # qstat: cannot connect to server pbs-primary (errno=15031)
+
+                # sleep for 10 seconds and try again
+                time.sleep(10)
+                num_retry += 1
+                error = e
+        else:
+            raise Exception("Failed to get job status after 10 retries, last error was:\n%s" % error)
+
+    states = {}
+    states['B'] = 'running' #'Array job has at least one subjob running'
+    states['E'] = 'running' #'Job is exiting after having run'
+    states['F'] = 'success' #'Job is finished'
+    states['H'] = 'running' #'Job is held'
+    states['M'] = 'running' #'Job was moved to another server'
+    states['Q'] = 'running' #'Job is queued'
+    states['R'] = 'running' #'Job is running'
+    states['S'] = 'running' #'Job is suspended'
+    states['T'] = 'running' #'Job is being moved to new location'
+    states['U'] = 'running' #'Cycle-harvesting job is suspended due to keyboard activity'
+    states['W'] = 'running' #'Job is waiting for its submitter-assigned start time to be reached'
+    states['X'] = 'success' #'Subjob has completed execution or has been deleted'
+
+    job_state_line = None
+    exit_status = None
+    for line in output.split('\n'):
+        if line.startswith('    job_state ='):
+            job_state_line = line.replace('    job_state =','').strip()
+        elif line.startswith('    Exit_status = '):
+            exit_status = int(line.replace('    Exit_status = ','').strip())
+    status = states[job_state_line]
+    if job_state_line == 'F':
+        if exit_status != 0:
+            print('failed')
+        else:
+            print('success')
+    else:
+        print(status)
