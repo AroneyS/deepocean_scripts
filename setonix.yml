@@ -1,0 +1,10 @@
+cluster: "/software/projects/pawsey1150/aroneys/deepocean_scripts/setonix_submit.py {dependencies}"
+cluster-status: "/software/projects/pawsey1150/aroneys/deepocean_scripts/setonix_status.py"
+cluster-cancel: scancel
+jobs: 10000
+rerun-incomplete: true # Without this, snakemake will attempt to resume when rerunning a rule, which fails immediately without error
+immediate-submit: true
+notemp: true
+default-resources:
+  account: pawsey1150
+# Copy to ~/.config/snakemake/setonix/config.yaml
