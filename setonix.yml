@@ -7,4 +7,5 @@ immediate-submit: true
 notemp: true
 default-resources:
   account: pawsey1150
+conda-prefix: /software/projects/pawsey1150/aroneys/conda_envs
 # Copy to ~/.config/snakemake/setonix/config.yaml
