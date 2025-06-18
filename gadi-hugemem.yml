@@ -1,0 +1,8 @@
+cluster: "/home/586/sa4958/deepocean_scripts/gadi_qsub -A zh61 -q hugemem -j oe -l jobfs=400GB,storage=scratch/zh61+gdata/zh61 --depend \"{dependencies}\""
+cluster-status: "/home/586/sa4958/deepocean_scripts/gadi_qstat"
+cluster-cancel: qdel
+jobs: 10000
+rerun-incomplete: true # Without this, snakemake will attempt to resume when rerunning a rule, which fails immediately without error
+immediate-submit: true
+notemp: true
+# Copy to ~/.config/snakemake/gadi-hugemem/config.yaml
