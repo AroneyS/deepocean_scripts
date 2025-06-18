@@ -1,4 +1,4 @@
-cluster: "/home/586/sa4958/deepocean_scripts/gadi_qsub -A zh61 -q normal -j oe -l jobfs=400GB,storage=scratch/d85+gdata/d85 --depend \"{dependencies}\""
+cluster: "/home/586/sa4958/deepocean_scripts/gadi_qsub -A zh61 -q normal -j oe -l jobfs=400GB,storage=scratch/zh61+gdata/zh61 --depend \"{dependencies}\""
 cluster-status: "/home/586/sa4958/deepocean_scripts/gadi_qstat"
 cluster-cancel: qdel
 jobs: 10000
