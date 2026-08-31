@@ -8,6 +8,27 @@ from snakemake.utils import read_job_properties
 
 # See https://github.com/Snakemake-Profiles/pbs-torque
 
+# GPU jobs (e.g. Aviary's taxvamb/semibin/comebin binners run with --request-gpu,
+# which set the snakemake rule's `resources: gpus = N`) are routed to gpuvolta
+# instead of whatever queue the profile passes via -q. NCI's gpuvolta queue is
+# allocated in fixed units of 12 cpus + ~95GB mem per GPU, so ncpus/mem are
+# overridden to that ratio rather than trusting the rule's CPU-mode thread/mem
+# request.
+GPU_QUEUE = "gpuvolta"
+CPUS_PER_GPU = 12
+MEM_GB_PER_GPU = 95
+
+# High-memory jobs (e.g. Aviary's prepare_binning_files_split, which requests the
+# full --aviary-recover-memory budget -- 250GB by default -- independently per
+# split, not divided among them) can exceed the `normal` queue's per-node memory
+# ceiling. Confirmed empirically on Gadi: `qsub -l mem=192GB -q normal` succeeds,
+# `qsub -l mem=256GB -q normal` fails with "Error: You have requested more memory
+# per node (256.0GB) than the nodes in queue normal can provide." Route jobs
+# requesting more than NORMAL_QUEUE_MAX_MEM_GB to hugemem instead, same pattern as
+# the GPU routing above.
+NORMAL_QUEUE_MAX_MEM_GB = 192
+HUGEMEM_QUEUE = "hugemem"
+
 parser=argparse.ArgumentParser(add_help=False)
 parser.add_argument("--depend", help="Space separated list of ids for jobs this job should depend on.")
 parser.add_argument("-a", help="Declare the time when the job becomes eligible for execution.")
@@ -117,30 +138,42 @@ if args.W: add= " -W \"" + args.W + "\""
 ncpus=""
 mem=""
 walltime=""
-
-if "threads" in job_properties:
-    ncpus = "ncpus=" + str(job_properties["threads"])
+gpus=0
 
 if "resources" in job_properties:
     resources = job_properties["resources"]
-    if "mem_mb" in resources:
-        provided_mem = resources["mem_mb"]
-        if provided_mem == "<TBD>":
-            mem=""
-        else:
-            mem="mem=" + str(resources["mem_mb"]) + "MB"
+    gpus = int(resources.get("gpus", 0) or 0)
+
+if gpus > 0:
+    q = " -q " + GPU_QUEUE
+    ncpus = "ncpus=" + str(CPUS_PER_GPU * gpus)
+    mem = "mem=" + str(MEM_GB_PER_GPU * gpus) + "GB"
+    ngpus = "ngpus=" + str(gpus)
+else:
+    ngpus = ""
+    if "threads" in job_properties:
+        ncpus = "ncpus=" + str(job_properties["threads"])
+    if "resources" in job_properties:
+        resources = job_properties["resources"]
+        if "mem_mb" in resources:
+            provided_mem = resources["mem_mb"]
+            if provided_mem == "<TBD>":
+                mem=""
+            else:
+                mem_mb_value = int(provided_mem)
+                mem="mem=" + str(mem_mb_value) + "MB"
+                if mem_mb_value > NORMAL_QUEUE_MAX_MEM_GB * 1024:
+                    q = " -q " + HUGEMEM_QUEUE
+
+if "resources" in job_properties:
+    resources = job_properties["resources"]
     if "runtime" in resources:
         walltime="walltime=" + str(resources["runtime"] * 60)
     else:
         walltime="walltime=48:00:00"
 
-if ncpus or mem or walltime: resourceparams = " -l \""
-if ncpus: resourceparams = resourceparams + ncpus
-if ncpus and mem: resourceparams = resourceparams + ","
-if mem: resourceparams = resourceparams + mem
-if walltime and (ncpus or mem): resourceparams = resourceparams + ","
-if walltime: resourceparams = resourceparams + walltime
-if ncpus or mem or walltime: resourceparams = resourceparams + "\""
+resourceparts = [p for p in [ncpus, ngpus, mem, walltime] if p]
+if resourceparts: resourceparams = " -l \"" + ",".join(resourceparts) + "\""
 
 if "cluster" in job_properties:
     cluster = job_properties["cluster"]
