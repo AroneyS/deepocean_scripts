@@ -29,6 +29,21 @@ MEM_GB_PER_GPU = 95
 NORMAL_QUEUE_MAX_MEM_GB = 192
 HUGEMEM_QUEUE = "hugemem"
 
+# Project zh61's walltime allocation on Gadi caps every queue (confirmed
+# empirically: normal, hugemem, AND gpuvolta all reject the same request with
+# "Requested walltime is longer than allowed for project 'zh61'. Maximum walltime
+# for job requesting N CPUs in <queue> queue is 48.0 hours.", independent of ncpus
+# too -- tested 4/8/16/32) at 48h, regardless of what a rule's own resources.runtime
+# lambda computes (e.g. Aviary's refine_rosella/refine_metabat2/refine_semibin
+# request 48h + 24h*attempt = 72h on attempt 1 alone). Unlike the memory case,
+# there's no bigger queue to escalate to -- 48h is the ceiling full stop (the error
+# itself says to email help@nci.org.au to raise it) -- so just cap whatever's
+# requested rather than let the submission fail outright. If a job genuinely needs
+# longer than 48h to finish, it'll get walltime-killed by PBS and need a
+# resubmit/resume; that's a real limitation of the current project allocation, not
+# something a client-side qsub trick can work around.
+PROJECT_MAX_WALLTIME_HOURS = 48
+
 parser=argparse.ArgumentParser(add_help=False)
 parser.add_argument("--depend", help="Space separated list of ids for jobs this job should depend on.")
 parser.add_argument("-a", help="Declare the time when the job becomes eligible for execution.")
@@ -168,7 +183,8 @@ else:
 if "resources" in job_properties:
     resources = job_properties["resources"]
     if "runtime" in resources:
-        walltime="walltime=" + str(resources["runtime"] * 60)
+        walltime_seconds = min(int(resources["runtime"]) * 60, PROJECT_MAX_WALLTIME_HOURS * 3600)
+        walltime = "walltime=" + str(walltime_seconds)
     else:
         walltime="walltime=48:00:00"
 
