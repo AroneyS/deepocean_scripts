@@ -44,6 +44,71 @@ HUGEMEM_QUEUE = "hugemem"
 # something a client-side qsub trick can work around.
 PROJECT_MAX_WALLTIME_HOURS = 48
 
+# pixi/envs/* directories were blowing up the zh61 project's gadi-scratch1 *inode*
+# quota (NCI explicitly discourages conda-style environments on Gadi for exactly
+# this reason -- many small files). Fixed by squashing each top-level pixi/envs/*
+# directory into one .sqfs image (one inode instead of the ~1.1M files they held
+# combined -- aviary-13890928915679139205 alone was 874K), leaving an EMPTY
+# placeholder directory at each original path. Nothing in those directories is
+# readable anymore unless bind-mounted back via apptainer, so every submitted job
+# now runs through an apptainer-exec wrapper that mounts all 5 images at their
+# original paths before invoking the real jobscript -- transparent to whatever
+# `pixi run --manifest-path ... -e <env> ...` the jobscript itself calls, since
+# each env resolves to its normal absolute path either way. Verified end-to-end
+# (rigorous negative-control tests -- empty placeholder + bind + read + confirm
+# host stays empty after -- for every image, plus a real PBS job running `pixi run
+# -e checkm2 checkm2 --help` through all 5 binds simultaneously) before wiring in.
+APPTAINER_BIN = "/opt/nci/apptainer/bin/apptainer"
+APPTAINER_BASE_SIF = "/home/586/sa4958/deepocean_scripts/sqfs_base/ubuntu.sif"
+PIXI_SQFS_DIR = "/scratch/zh61/sa4958/pixi/sqfs"
+PIXI_ENVS_DIR = "/scratch/zh61/sa4958/pixi/envs"
+PIXI_SQFS_ENVS = [
+    "aviary-13890928915679139205",
+    "binchicken-16235779617320621780",
+    "DeepOceanGenomes-9637173285384759191",
+    "BinChicken-5222337612630778772",
+    "assembly_checkpointing-2012764050369663368",
+]
+
+# The apptainer base image (ubuntu:22.04) ships Debian's shell-script `which`,
+# incompatible with the GNU `which` flags Gadi's own Rocky Linux 8 base provides
+# -- broke aviary's coverm rule (bird_tool_utils's external_command_checker calls
+# `which minimap2` and choked on Ubuntu's `which` with "Illegal option --",
+# reported as "Could not find an available minimap2 executable" even though
+# minimap2 was present and correctly on PATH). Fixed by bind-mounting Gadi's own
+# `which` binary in over the container's -- NOT the whole /usr (tried that first:
+# it collided with the container's own glibc/dynamic-linker resolution and broke
+# pixi's own virtual-package detection). `/usr/bin/which` on Gadi is itself a
+# symlink into NCI's `/half-root` overlay; bind the fully-resolved real file
+# so the container doesn't have to re-resolve a symlink chain that only makes
+# sense in the host's own mount namespace.
+GADI_WHICH_BIN = "/half-root/usr/bin/which"
+
+
+def make_apptainer_wrapper(jobscript):
+    """Write a small wrapper next to `jobscript` that apptainer-execs it with all
+    5 pixi env squashfs images bind-mounted at their original paths, and return
+    the wrapper's path. The original jobscript's own content/logic is untouched --
+    only what gets submitted to qsub changes.
+    """
+    binds = " ".join(
+        f"--bind {PIXI_SQFS_DIR}/{name}.sqfs:{PIXI_ENVS_DIR}/{name}:image-src=/"
+        for name in PIXI_SQFS_ENVS
+    )
+    wrapper_path = jobscript + ".apptainer_wrap.sh"
+    with open(wrapper_path, "w") as f:
+        f.write(f"""#!/bin/bash
+set -euo pipefail
+exec "{APPTAINER_BIN}" exec {binds} \\
+    --bind "$HOME:$HOME" --bind /etc/ssl:/etc/ssl --bind /etc/pki:/etc/pki \\
+    --bind "{GADI_WHICH_BIN}:/usr/bin/which" \\
+    --bind "$PWD:$PWD" --pwd "$PWD" \\
+    "{APPTAINER_BASE_SIF}" env PATH="$PATH" bash "{jobscript}"
+""")
+    os.chmod(wrapper_path, 0o755)
+    return wrapper_path
+
+
 parser=argparse.ArgumentParser(add_help=False)
 parser.add_argument("--depend", help="Space separated list of ids for jobs this job should depend on.")
 parser.add_argument("-a", help="Declare the time when the job becomes eligible for execution.")
@@ -121,7 +186,9 @@ if depend:
 	depend = " -W \"depend=afterok" + depend + "\""
 
 if args.positional:
-	for m in args.positional:
+	positional = list(args.positional)
+	positional[-1] = make_apptainer_wrapper(positional[-1])
+	for m in positional:
 		extras = extras + " " + m
 
 if args.a: atime = " -a " + args.a
