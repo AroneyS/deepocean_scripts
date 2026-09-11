@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import re
 import sys
 import argparse
 import subprocess
@@ -43,6 +44,51 @@ HUGEMEM_QUEUE = "hugemem"
 # resubmit/resume; that's a real limitation of the current project allocation, not
 # something a client-side qsub trick can work around.
 PROJECT_MAX_WALLTIME_HOURS = 48
+
+# Per-rule floors for resources the snakemake profile requests globally, or that
+# aviary hardcodes too low. Both are raised only for the named rules so the
+# profile-wide defaults (deliberately modest, on NCI's advice, because
+# over-requesting delays scheduling) stay untouched for everything else.
+#
+# jobfs: measured across all 29 rules and ~600 completed jobs, exactly one rule
+# uses non-trivial node-local scratch -- prepare_binning_files_split peaked at
+# 65.4GB over 121 runs (that peak IS the run PBS killed at the 60GB request), while
+# every other rule stayed at or below 1.9GB. It is the coverm mapping/BAM-sort step,
+# so its temp usage scales with the read volume of the coassembly's split; 200GB
+# gives ~3x headroom over the observed peak for the larger coassemblies still to
+# run, and still asks for half of the old profile-wide 400GB.
+RULE_MIN_JOBFS_GB = {
+    "prepare_binning_files_split": 150,
+}
+# walltime: aviary hardcodes `runtime = 24*60*attempt` for comebin, and under
+# --immediate-submit snakemake's retries never fire (that is also why the memory
+# tiering lives in manage_recover.py rather than relying on attempt escalation), so
+# attempt is permanently 1 and comebin can never get more than 24h -- despite
+# observed runs finishing just over that (24:02 walltime, 81 CPU-hours). There is no
+# aviary CLI/config knob for it, so floor it here instead. Still bounded by
+# PROJECT_MAX_WALLTIME_HOURS below, so this cannot request more than the project
+# allows.
+RULE_MIN_WALLTIME_HOURS = {
+    "comebin": 48,
+}
+
+
+def apply_rule_jobfs(resource_arg, rule):
+    """Raise a `-l ...jobfs=NGB...` request to this rule's floor, if it has one.
+
+    Rewrites rather than appends: PBS takes the last value for a repeated resource,
+    and leaving two conflicting jobfs= entries in one -l string is ambiguous.
+    """
+    need = RULE_MIN_JOBFS_GB.get(rule)
+    if not need or not resource_arg:
+        return resource_arg
+
+    def repl(m):
+        value, unit = float(m.group(1)), m.group(2).upper()
+        gb = {"K": value / 1048576, "M": value / 1024, "G": value, "T": value * 1024}[unit]
+        return f"jobfs={need}GB" if gb < need else m.group(0)
+
+    return re.sub(r"jobfs=([0-9.]+)([KMGT])B?", repl, resource_arg, flags=re.IGNORECASE)
 
 # pixi/envs/* directories were blowing up the zh61 project's gadi-scratch1 *inode*
 # quota (NCI explicitly discourages conda-style environments on Gadi for exactly
@@ -202,7 +248,7 @@ if args.e: se = " -e " + args.e
 if args.f: ft = " -f"
 if args.h: hold = " -h"
 if args.j: j = " -j " + args.j
-if args.l: resource = " -l " + args.l
+if args.l: resource = " -l " + apply_rule_jobfs(args.l, job_properties.get("rule", ""))
 if args.m: mail = " -m " + args.m
 if args.M: mailuser = " -M " + args.M
 if args.N: jname = " -N " + args.N
@@ -250,7 +296,10 @@ else:
 if "resources" in job_properties:
     resources = job_properties["resources"]
     if "runtime" in resources:
-        walltime_seconds = min(int(resources["runtime"]) * 60, PROJECT_MAX_WALLTIME_HOURS * 3600)
+        # Floor first (aviary underestimates some rules), then the project cap.
+        requested = int(resources["runtime"]) * 60
+        floor = RULE_MIN_WALLTIME_HOURS.get(job_properties.get("rule", ""), 0) * 3600
+        walltime_seconds = min(max(requested, floor), PROJECT_MAX_WALLTIME_HOURS * 3600)
         walltime = "walltime=" + str(walltime_seconds)
     else:
         walltime="walltime=48:00:00"
