@@ -54,25 +54,14 @@ PROJECT_MAX_WALLTIME_HOURS = 48
 # uses non-trivial node-local scratch -- prepare_binning_files_split peaked at
 # 65.4GB over 121 runs (that peak IS the run PBS killed at the 60GB request), while
 # every other rule stayed at or below 1.9GB. It is the coverm mapping/BAM-sort step,
-# so its temp usage scales with the read volume of the coassembly's split; 200GB
-# gives ~3x headroom over the observed peak for the larger coassemblies still to
-# run, and still asks for half of the old profile-wide 400GB.
+# so its temp usage scales with the read volume of the coassembly's split. 150GB is
+# ~2.3x the observed peak, chosen over 100GB because scaling that peak to the
+# largest coassembly still to run (770GiB of reads vs 471GiB) projects ~107GB, and
+# over-requesting costs only some scheduling flexibility whereas under-requesting
+# costs a SIGTERM plus the whole downstream afterok chain.
 RULE_MIN_JOBFS_GB = {
     "prepare_binning_files_split": 150,
 }
-# walltime: aviary hardcodes `runtime = 24*60*attempt` for comebin, and under
-# --immediate-submit snakemake's retries never fire (that is also why the memory
-# tiering lives in manage_recover.py rather than relying on attempt escalation), so
-# attempt is permanently 1 and comebin can never get more than 24h -- despite
-# observed runs finishing just over that (24:02 walltime, 81 CPU-hours). There is no
-# aviary CLI/config knob for it, so floor it here instead. Still bounded by
-# PROJECT_MAX_WALLTIME_HOURS below, so this cannot request more than the project
-# allows.
-RULE_MIN_WALLTIME_HOURS = {
-    "comebin": 48,
-}
-
-
 def apply_rule_jobfs(resource_arg, rule):
     """Raise a `-l ...jobfs=NGB...` request to this rule's floor, if it has one.
 
@@ -296,10 +285,7 @@ else:
 if "resources" in job_properties:
     resources = job_properties["resources"]
     if "runtime" in resources:
-        # Floor first (aviary underestimates some rules), then the project cap.
-        requested = int(resources["runtime"]) * 60
-        floor = RULE_MIN_WALLTIME_HOURS.get(job_properties.get("rule", ""), 0) * 3600
-        walltime_seconds = min(max(requested, floor), PROJECT_MAX_WALLTIME_HOURS * 3600)
+        walltime_seconds = min(int(resources["runtime"]) * 60, PROJECT_MAX_WALLTIME_HOURS * 3600)
         walltime = "walltime=" + str(walltime_seconds)
     else:
         walltime="walltime=48:00:00"
