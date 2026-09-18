@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+
+"""
+Author: Samuel Aroney
+Submit a self-contained PBS jobscript on Gadi through the pixi-squashfs apptainer wrapper.
+
+WHY THIS EXISTS
+---------------
+Gadi's pixi environments live as squashfs images, not directories: each top-level
+detached-environment directory under /scratch/zh61/sa4958/pixi/envs was mksquashfs'd
+into one .sqfs under .../pixi/sqfs (pixi/envs/* was exhausting the zh61 project's
+gadi-scratch1 *inode* quota -- aviary's env alone held 874K files), leaving an EMPTY
+placeholder directory at the original path. Nothing in a squashed env is readable
+unless the image is bind-mounted back over that placeholder, so every job that runs
+`pixi run --manifest-path ... -e <env> ...` must be wrapped in an `apptainer exec`
+that restores the binds.
+
+~/deepocean_scripts/gadi_qsub already does exactly that, but it is a *snakemake*
+cluster-submission shim: it calls snakemake.utils.read_job_properties() on the
+jobscript to derive -l ncpus/mem/walltime, and takes every other PBS directive as a
+command-line argument. Scripts that build their own complete jobscript (directives
+included) and submit it with a plain `qsub` -- manage_eggnog.py's emapper array jobs
+-- cannot use it, and a plain `qsub` gets no binds at all: the job fails with an
+empty environment, which surfaces as a confusing "command not found" for a tool that
+is definitely installed.
+
+This script is the non-snakemake counterpart. It takes a jobscript that already
+carries its own `#PBS` directives, writes a wrapper next to it that
+
+  * repeats those `#PBS` directives verbatim (PBS only ever reads directives from the
+    script it is handed, so they have to move with the submission), and
+  * `apptainer exec`s the ORIGINAL jobscript with every pixi image bound back at its
+    original path,
+
+then qsubs the wrapper and prints the job id. The jobscript's own content is never
+modified or reinterpreted.
+
+Array jobs work unchanged: apptainer passes the host environment into the container
+by default, so PBS_ARRAY_INDEX is visible to the jobscript inside the wrapper. Note that
+an array jobscript must carry `#PBS -r y` on Gadi -- the server's own
+default_qsub_arguments is `-r n`, and PBS rejects a non-rerunable array with "cannot
+submit non-rerunable Array Job" (manage_eggnog.py's _make_pbs_script already sets it).
+
+Usage:
+    gadi_qsub_direct [--bind PATH ...] [<extra qsub args>] <jobscript>
+
+--bind is repeatable and adds a data path to the container (e.g. the scratch tree a
+job reads its inputs from and writes its outputs to). Only $HOME, /tmp and the paths
+named here are visible inside the container -- /scratch is NOT mounted by default --
+so a job whose inputs live on /scratch must be given them. Pass sibling paths rather
+than a common parent of PIXI_ENVS_DIR, so a data bind never nests inside an image
+bind.
+"""
+
+import os
+import sys
+import argparse
+import subprocess
+
+# Kept deliberately identical to ~/deepocean_scripts/gadi_qsub's own constants -- both
+# files describe the same physical set of images, so they must agree. PIXI_SQFS_ENVS is
+# the full list gadi_qsub mounts; mounting all of them here too (rather than only the
+# one env a given job needs) keeps the two wrappers behaving identically, and an unused
+# bind costs nothing.
+APPTAINER_BIN = "/opt/nci/apptainer/bin/apptainer"
+APPTAINER_BASE_SIF = "/home/586/sa4958/deepocean_scripts/sqfs_base/ubuntu.sif"
+PIXI_SQFS_DIR = "/scratch/zh61/sa4958/pixi/sqfs"
+PIXI_ENVS_DIR = "/scratch/zh61/sa4958/pixi/envs"
+PIXI_SQFS_ENVS = [
+    "aviary-13890928915679139205",
+    "binchicken-16235779617320621780",
+    "DeepOceanGenomes-9637173285384759191",
+    "BinChicken-5222337612630778772",
+    "assembly_checkpointing-2012764050369663368",
+]
+
+# pixi's global config (~/.pixi/config.toml) points its cache root at scratch, and pixi
+# consults that path on every `pixi run` even when the environment is already installed
+# and --frozen means nothing will be solved. Bound so a missing cache root can't make
+# pixi bail inside the container. A sibling of pixi/envs, so it never nests inside an
+# image bind.
+#
+# Bound CONDITIONALLY, in the wrapper rather than here: this directory is not permanent
+# (`pixi clean cache` removes it, and it is 13GB/300K inodes of a quota-limited
+# filesystem, so it will be cleaned periodically), and apptainer treats a bind whose
+# source is missing as fatal -- "container creation failed: mount ... doesn't exist",
+# exit 255, before the jobscript runs at all. Deciding in the wrapper rather than at
+# submission time covers the gap between the two, which for a queued array job is hours.
+PIXI_CACHE_DIR = "/scratch/zh61/sa4958/pixi/cache"
+# apptainer sets its own PATH inside the container, which would not include pixi.
+# gadi_qsub forwards the host PATH for this reason; prepending pixi's own bin
+# additionally covers a jobscript submitted from an environment where ~/.bashrc (which
+# is what puts pixi on PATH) was never sourced.
+PIXI_BIN_DIR = "/home/586/sa4958/.pixi/bin"
+
+# The apptainer base image (ubuntu:22.04) ships Debian's shell-script `which`, which is
+# incompatible with the GNU `which` flags Gadi's Rocky Linux 8 base provides (broke
+# aviary's coverm rule: bird_tool_utils calls `which minimap2` and choked with "Illegal
+# option --"). Bind Gadi's own fully-resolved `which` binary in over the container's --
+# NOT the whole /usr, which collides with the container's glibc/dynamic-linker
+# resolution and breaks pixi's own virtual-package detection.
+GADI_WHICH_BIN = "/half-root/usr/bin/which"
+
+
+def pbs_directives(jobscript):
+    """The jobscript's own `#PBS` lines, in order.
+
+    PBS stops scanning for directives at the first line that is neither blank nor a
+    comment, so these are re-emitted at the top of the wrapper, immediately after its
+    shebang. Reading them out of the jobscript (rather than requiring them on the
+    command line, as gadi_qsub does) is the whole point of this script: the jobscript
+    stays the single source of truth for its own resource request.
+    """
+    directives = []
+    with open(jobscript) as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped.startswith("#PBS"):
+                directives.append(stripped)
+            elif stripped and not stripped.startswith("#"):
+                break
+    return directives
+
+
+def make_apptainer_wrapper(jobscript, binds):
+    """Write the wrapper that apptainer-execs `jobscript` with every pixi image bound
+    back at its original path, and return its path. Returns the wrapper to submit; the
+    original jobscript is left untouched.
+    """
+    image_binds = " \\\n    ".join(
+        f"--bind {PIXI_SQFS_DIR}/{name}.sqfs:{PIXI_ENVS_DIR}/{name}:image-src=/"
+        for name in PIXI_SQFS_ENVS
+    )
+    # normpath so a caller's trailing slash (manage_eggnog.py's scratch_path has one)
+    # doesn't reach apptainer's bind parser.
+    data_binds = "".join(
+        f' \\\n    --bind "{p}:{p}"' for p in (os.path.normpath(b) for b in binds)
+    )
+    directives = "\n".join(pbs_directives(jobscript))
+    wrapper_path = jobscript + ".apptainer_wrap.sh"
+    with open(wrapper_path, "w") as f:
+        f.write(f"""#!/bin/bash
+{directives}
+
+set -euo pipefail
+
+# $PWD is only bound when it is outside $HOME (which is bound unconditionally):
+# binding a path that is already inside a bound parent is redundant, and PBS starts a
+# job in $HOME unless told otherwise. Left unquoted below so an empty value expands to
+# nothing rather than to an empty argument.
+EXTRA_BIND=""
+case "$PWD/" in
+    "$HOME"/*) ;;
+    *) EXTRA_BIND="--bind $PWD:$PWD" ;;
+esac
+
+# See PIXI_CACHE_DIR: skipped when absent, because apptainer makes a missing bind source
+# fatal and this one is expendable.
+CACHE_BIND=""
+if [ -d "{PIXI_CACHE_DIR}" ]; then
+    CACHE_BIND="--bind {PIXI_CACHE_DIR}:{PIXI_CACHE_DIR}"
+fi
+
+exec "{APPTAINER_BIN}" exec \\
+    {image_binds} \\
+    $CACHE_BIND \\
+    --bind "$HOME:$HOME" --bind /etc/ssl:/etc/ssl --bind /etc/pki:/etc/pki \\
+    --bind "{GADI_WHICH_BIN}:/usr/bin/which"{data_binds} \\
+    $EXTRA_BIND --pwd "$PWD" \\
+    "{APPTAINER_BASE_SIF}" env PATH="{PIXI_BIN_DIR}:$PATH" bash "{jobscript}"
+""")
+    os.chmod(wrapper_path, 0o755)
+    return wrapper_path
+
+
+def main(arguments):
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--bind",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Extra path to bind into the container, repeatable (e.g. the scratch tree "
+             "holding the job's inputs and outputs). /scratch is not mounted by default.",
+    )
+    # Anything else is handed straight to qsub, so this stays a drop-in for `qsub
+    # <script>` without having to enumerate PBS's whole option set.
+    args, qsub_args = parser.parse_known_args(arguments)
+
+    if not qsub_args:
+        parser.error("no jobscript given")
+    jobscript = qsub_args[-1]
+    qsub_args = qsub_args[:-1]
+    if not os.path.isfile(jobscript):
+        parser.error(f"jobscript not found: {jobscript}")
+
+    for path in args.bind:
+        if not os.path.exists(path):
+            parser.error(f"--bind path does not exist: {path}")
+
+    wrapper = make_apptainer_wrapper(jobscript, args.bind)
+    cmd = " ".join(["qsub"] + qsub_args + [f"'{wrapper}'"])
+    result = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE)
+    # Nothing else is printed: callers (manage_eggnog.py) parse stdout as the job id.
+    print(result.stdout.decode().strip())
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
