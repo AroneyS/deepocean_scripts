@@ -43,7 +43,43 @@ HUGEMEM_QUEUE = "hugemem"
 # longer than 48h to finish, it'll get walltime-killed by PBS and need a
 # resubmit/resume; that's a real limitation of the current project allocation, not
 # something a client-side qsub trick can work around.
+# Memory to request when snakemake reports mem_mb as "<TBD>" at submission time.
+#
+# A rule that declares no mem_mb of its own inherits snakemake's built-in default,
+# 2*input.size_mb -- which cannot be evaluated when the job is submitted, because
+# --immediate-submit queues the whole DAG before any earlier rule has produced that
+# input. Snakemake therefore sends "<TBD>", and this used to become mem="" -- no mem in
+# the -l string at all, so PBS applied its own 500MB default. Any such rule needing more
+# than 500MB was then SIGKILLed the moment it ran: observed 2026-09-21 on
+# filter_contigs_by_size, which resolved to mem_mb=4540 at execution (2 x a 2.21GB
+# assembly) against the 500MB it had actually been given, taking ~30 afterok dependants
+# down with it and emailing about each.
+#
+# 8GB is deliberately a single global number rather than a per-rule table: no mem_mb
+# expression anywhere in aviary references `input`, so every rule that sets its own
+# mem_mb computes it from config/attempt alone and resolves fine at submit time --
+# "<TBD>" only ever reaches here from rules that declare nothing. In binning.smk that is
+# just filter_contigs_by_size, semibin_multi_prepare and vamb_skip, and the largest
+# assembly in this project is 3.48GB, so the biggest 2*input this can ever mean is 7.0GB.
+# Real usage is far lower (seqkit streams; the rest is snakemake's own ~0.5GB), so this
+# is a ceiling that costs nothing in scheduling terms.
+TBD_FALLBACK_MEM_MB = 8 * 1024
+
 PROJECT_MAX_WALLTIME_HOURS = 48
+
+# Per-rule walltime CEILINGS, applied on top of the project-wide cap above (contrast
+# RULE_MIN_JOBFS_GB below, which raises floors). Only for rules whose failure mode is a
+# non-converging hang rather than honest slowness: for those a rule's own
+# resources.runtime is a request for the worst case, and honouring it just means paying
+# the full 48h before the manager can see the stall and stop asking for that binner.
+# quickbin has never completed a coassembly in this project (3 runs, all killed, after
+# 0.25-17.8h, ~2,880 SU) while requesting the full 48h, so cap it low enough that a hang
+# is cheap and surfaces as a -29 promptly. Keep in step with manage_recover.py's
+# HANG_PRONE_BINNERS, which is what acts on that -29: a cap here with no entry there
+# truncates the binner on every attempt instead of giving up on it.
+RULE_MAX_WALLTIME_HOURS = {
+    "quickbin": 6,
+}
 
 # Per-rule floors for resources the snakemake profile requests globally, or that
 # aviary hardcodes too low. Both are raised only for the named rules so the
@@ -117,6 +153,22 @@ PIXI_SQFS_ENVS = [
 # symlink into NCI's `/half-root` overlay; bind the fully-resolved real file
 # so the container doesn't have to re-resolve a symlink chain that only makes
 # sense in the host's own mount namespace.
+# Every pixi env here is bind-mounted from a read-only squashfs image, including the
+# one holding aviary's own nested project manifest
+# (binchicken-<hash>/envs/aviary/.../site-packages/aviary/pixi.toml). Aviary's rules
+# shell out to `pixi run --manifest-path <that> -e <env>`, and pixi will rewrite the
+# lock file beside the manifest whenever it considers it stale -- which fails on a
+# read-only mount with "failed to write lock file to disk / Read-only file system
+# (os error 30)". That killed every coassembly at filter_contigs_by_size (the second
+# rule) on 2026-09-20: 314 identical failures, no coassembly ever reached mapping.
+# It only began after pixi was upgraded to 0.78.0 and aviary to 0.13.3 -- the same
+# read-only mounts worked before, so it is pixi deciding the existing lock needs
+# migrating, not a missing lock (both old and new images ship one).
+#
+# PIXI_FROZEN=true makes pixi use the lock as-is and never write it. Set here rather
+# than in aviary (whose pixi_run string we do not control) or per-rule, so it covers
+# every pixi invocation any rule makes inside the container. Verified by running the
+# exact failing seqkit command under the real bind set with and without it.
 GADI_WHICH_BIN = "/half-root/usr/bin/which"
 
 
@@ -138,7 +190,7 @@ exec "{APPTAINER_BIN}" exec {binds} \\
     --bind "$HOME:$HOME" --bind /etc/ssl:/etc/ssl --bind /etc/pki:/etc/pki \\
     --bind "{GADI_WHICH_BIN}:/usr/bin/which" \\
     --bind "$PWD:$PWD" --pwd "$PWD" \\
-    "{APPTAINER_BASE_SIF}" env PATH="$PATH" bash "{jobscript}"
+    "{APPTAINER_BASE_SIF}" env PATH="$PATH" PIXI_FROZEN=true bash "{jobscript}"
 """)
     os.chmod(wrapper_path, 0o755)
     return wrapper_path
@@ -275,7 +327,7 @@ else:
         if "mem_mb" in resources:
             provided_mem = resources["mem_mb"]
             if provided_mem == "<TBD>":
-                mem=""
+                mem = "mem=" + str(TBD_FALLBACK_MEM_MB) + "MB"
             else:
                 mem_mb_value = int(provided_mem)
                 mem="mem=" + str(mem_mb_value) + "MB"
@@ -284,11 +336,17 @@ else:
 
 if "resources" in job_properties:
     resources = job_properties["resources"]
+    # Lowest applicable ceiling: the project-wide cap, reduced for rules listed in
+    # RULE_MAX_WALLTIME_HOURS. Applied to the no-runtime branch too, so a capped rule
+    # cannot slip through at the 48h default by omitting resources.runtime.
+    cap_seconds = min(PROJECT_MAX_WALLTIME_HOURS,
+                      RULE_MAX_WALLTIME_HOURS.get(job_properties.get("rule", ""),
+                                                  PROJECT_MAX_WALLTIME_HOURS)) * 3600
     if "runtime" in resources:
-        walltime_seconds = min(int(resources["runtime"]) * 60, PROJECT_MAX_WALLTIME_HOURS * 3600)
-        walltime = "walltime=" + str(walltime_seconds)
+        walltime_seconds = min(int(resources["runtime"]) * 60, cap_seconds)
     else:
-        walltime="walltime=48:00:00"
+        walltime_seconds = cap_seconds
+    walltime = "walltime=" + str(walltime_seconds)
 
 resourceparts = [p for p in [ncpus, ngpus, mem, walltime] if p]
 if resourceparts: resourceparams = " -l \"" + ",".join(resourceparts) + "\""
