@@ -77,8 +77,62 @@ PROJECT_MAX_WALLTIME_HOURS = 48
 # is cheap and surfaces as a -29 promptly. Keep in step with manage_recover.py's
 # HANG_PRONE_BINNERS, which is what acts on that -29: a cap here with no entry there
 # truncates the binner on every attempt instead of giving up on it.
+# Ceilings below are 4x the MAXIMUM walltime observed over the ~2,400 successful jobs in
+# results/recover/20260813/resource_usage.tsv, rounded up to a sane step. They exist
+# because NCI's priority calculation sums each queued job's POTENTIAL allocation
+# (walltime x ncpus) at its full request -- and counts afterok-HELD jobs too. With ~557
+# jobs per in-flight batch, nearly all inheriting the profile's 24-48h default, that sum
+# reached 1,828,848 cpu-hours against 50,098 actually used (36.5x), which NCI confirmed
+# (2026-09-22) tipped the formula into a pathological case: zh61 jobs sat at Priority 0
+# with "under job_sort_formula threshold value" for ~30h until staff intervened manually.
+# Their advice was to shrink the number of jobs in dependency chains, or make the
+# allocation requests accurate. This table does the latter: it takes the counted total to
+# 686,342 cpu-hours (2.7x reduction) while still leaving 4x headroom on every rule.
+#
+# Deliberately ABSENT, so they keep their own (accurate) requests:
+#   prepare_binning_files_split -- 32.96h observed against a 48h request
+#   rosella                     -- 16.67h observed against a 24h request
+# Those two dominate what remains, which is why the reduction is 2.7x and not 30x.
+#
+# CAUTION when editing: unlike the memory floor above, too LOW a value here is actively
+# destructive -- the job is walltime-killed (-29), and under --immediate-submit PBS then
+# terminates every afterok dependant, turning one bad ceiling into a stalled coassembly
+# plus a flood of abort emails. Raise on suspicion, never trim to fit.
+#
+# These numbers come from aviary 0.13.2 / minimap2-sr / coverm 0.7.0. This project now
+# runs 0.13.3 with strobealign and coverm 0.8.0, so anything mapping-adjacent may shift;
+# revisit once the current run has produced its own resource_usage.tsv. quickbin's 6 is
+# not measurement-derived at all -- it has never succeeded here, so it is a deliberate
+# budget (see manage_recover.py's HANG_PRONE_BINNERS).
 RULE_MAX_WALLTIME_HOURS = {
+    "checkm_das_tool": 2,
+    "checkm_metabat2": 1,
+    "checkm_rosella": 1,
+    "checkm_semibin": 1,
+    "comebin": 36,
+    "convert_metabuli": 1,
+    "das_tool": 4,
+    "filter_contigs_by_size": 1,
+    "finalise_stats": 1,
+    "get_bam_indices": 1,
+    "metabat2": 2,
+    "metabat_sens": 4,
+    "metabat_spec": 4,
+    "metabat_ssens": 4,
+    "metabat_sspec": 2,
+    "metabuli_taxonomy": 1,
+    "prepare_binning_files": 4,
+    "prepare_binning_files_gather": 1,
     "quickbin": 6,
+    "refine_dastool": 1,
+    "refine_metabat2": 1,
+    "refine_rosella": 1,
+    "refine_semibin": 1,
+    "semibin": 12,
+    "taxvamb": 16,
+    "taxvamb_abundance_tsv": 1,
+    "vamb": 8,
+    "vamb_jgi_filter": 1,
 }
 
 # Per-rule floors for resources the snakemake profile requests globally, or that
