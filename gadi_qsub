@@ -104,22 +104,37 @@ PROJECT_MAX_WALLTIME_HOURS = 48
 # revisit once the current run has produced its own resource_usage.tsv. quickbin's 6 is
 # not measurement-derived at all -- it has never succeeded here, so it is a deliberate
 # budget (see manage_recover.py's HANG_PRONE_BINNERS).
+#
+# 2026-09-25 revision, against results/recover/20260918/resource_usage.tsv (aviary 0.13.3 /
+# strobealign / coverm 0.8.0): every cap verified to retain >=2x headroom except the metabat
+# family, whose runtimes rose sharply on the new stack -- metabat_sspec went 0.37h -> 1.57h,
+# leaving only 1.3x against its 2h cap. sspec raised 2 -> 4 and sens/ssens/spec 4 -> 6.
+# Note prepare_binning_files_split got FASTER (32.96h -> 1.37h max), so the decision to
+# leave it uncapped costs nothing; revisit capping it once more coassemblies finish.
+# comebin's 12 is a deliberate exception to the 4x-of-observed-max rule this table
+# otherwise follows. Across 31 successful runs on the current stack it never exceeded
+# 6.51h (median 3.11h), so 4x would be ~26h -- but its failure mode is hanging, not
+# running long, and its walltime kills were burning the full 24.03h before being dropped
+# by manage_recover.py's HANG_PRONE_BINNERS. 12h keeps ~1.8x headroom over the worst
+# real run while cutting the cost of each hang by ~2x. The tradeoff is explicit: a
+# genuinely slow comebin needing >12h is killed and dropped rather than finished, which
+# is acceptable because it is an opt-in extra binner whose output is not required.
 RULE_MAX_WALLTIME_HOURS = {
     "checkm_das_tool": 2,
     "checkm_metabat2": 1,
     "checkm_rosella": 1,
     "checkm_semibin": 1,
-    "comebin": 36,
+    "comebin": 12,   # policy, not 4x-of-max -- see note below
     "convert_metabuli": 1,
     "das_tool": 4,
     "filter_contigs_by_size": 1,
     "finalise_stats": 1,
     "get_bam_indices": 1,
     "metabat2": 2,
-    "metabat_sens": 4,
-    "metabat_spec": 4,
-    "metabat_ssens": 4,
-    "metabat_sspec": 2,
+    "metabat_sens": 6,
+    "metabat_spec": 6,
+    "metabat_ssens": 6,
+    "metabat_sspec": 4,
     "metabuli_taxonomy": 1,
     "prepare_binning_files": 4,
     "prepare_binning_files_gather": 1,
